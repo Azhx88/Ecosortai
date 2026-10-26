@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Eco recycling badge ring & leaf icon centered inside 66dp safe area (21..87) -->
+    <!-- Outer accent ring -->
+    <path
+        android:fillColor="#22FFFFFF"
+        android:pathData="M54,23 C36.88,23 23,36.88 23,54 C23,71.12 36.88,85 54,85 C71.12,85 85,71.12 85,54 C85,36.88 71.12,23 54,23 Z M54,79 C40.22,79 29,67.78 29,54 C29,40.22 40.22,29 54,29 C67.78,29 79,40.22 79,54 C79,67.78 67.78,79 54,79 Z" />
+    
+    <!-- Recycling 3-arrow geometric icon -->
+    <!-- Arrow 1 (Top / Right) -->
+    <path
+        android:fillColor="#E8F5E9"
+        android:pathData="M51.5,33 L57.5,33 L62,39 L69,39 L60,27 L51.5,39 L56,39 Z" />
+    <!-- Arrow 2 (Right / Bottom) -->
+    <path
+        android:fillColor="#C8E6C9"
+        android:pathData="M69,57 L72,62.2 L66,65.7 L70,71.5 L77,60 L65,58 L67,61.8 Z" />
+    <!-- Arrow 3 (Left / Bottom) -->
+    <path
+        android:fillColor="#A5D6A7"
+        android:pathData="M40,64 L36,59 L42,55.5 L36,49.5 L31,61 L42,65 Z" />
+
+    <!-- Center stylized eco leaf -->
+    <path
+        android:fillColor="#81C784"
+        android:pathData="M54,42 C54,42 63,47 63,56 C63,62 58.5,66 54,66 C49.5,66 45,62 45,56 C45,47 54,42 54,42 Z" />
+    <!-- Leaf stem/vein highlight -->
+    <path
+        android:strokeColor="#1B5E20"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M54,64 L54,48 M54,55 L58,52 M54,58 L50,55" />
+
+    <!-- AI Sparkle upper-right -->
+    <path
+        android:fillColor="#FFF59D"
+        android:pathData="M72,30 L73.5,34.5 L78,36 L73.5,37.5 L72,42 L70.5,37.5 L66,36 L70.5,34.5 Z" />
+</vector>

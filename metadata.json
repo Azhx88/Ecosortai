@@ -1,0 +1,6 @@
+{
+  "name": "EcoSort AI",
+  "description": "AI-powered smart waste segregation and recycling assistant with visual classification, local recycling centers map & guidance, disposal rules, eco-rewards, and community leaderboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
