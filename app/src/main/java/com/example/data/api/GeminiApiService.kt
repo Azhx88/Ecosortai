@@ -5,6 +5,7 @@ import android.util.Base64
 import com.example.BuildConfig
 import com.example.data.model.WasteBinType
 import com.example.data.model.WasteClassification
+import com.example.data.model.WasteDisposalGuideResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -303,4 +304,491 @@ object GeminiApiService {
       }
     }
   }
+
+  suspend fun fetchWasteDecompositionGuide(
+    itemQuery: String
+  ): WasteDisposalGuideResult = withContext(Dispatchers.IO) {
+    val cleanQuery = itemQuery.trim()
+    if (cleanQuery.isEmpty()) {
+      return@withContext generateDecompositionFallback("Organic Food Scraps")
+    }
+
+    try {
+      val apiKey = try {
+        BuildConfig.GEMINI_API_KEY
+      } catch (_: Throwable) {
+        ""
+      }
+
+      if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY") {
+        return@withContext generateDecompositionFallback(cleanQuery)
+      }
+
+      val prompt = """
+        You are an expert Waste Disposal, Recycling, and Organic Decomposition Specialist.
+        The user is searching the Bin Guide for how to dispose of: "$cleanQuery".
+
+        First, determine whether "$cleanQuery" is biodegradable / naturally decomposable (such as food scraps, fruit/vegetable peels, cooked food, tea/coffee grounds, eggshells, garden leaves, or uncoated paper/cardboard) OR non-decomposable (such as plastic, metal, glass, e-waste, batteries, chemicals, ceramics, rubber, or multi-layer wrappers).
+
+        - If it IS decomposable (`"isOrganicDecomposable": true`), include a practical natural decomposition / composting idea in `"vermicompostGuide"` (such as Vermicomposting with earthworms, Aerobic pot composting, or Bokashi pre-composting) and provide `"carbonNitrogenBalance"`.
+        - If it is NOT decomposable (`"isOrganicDecomposable": false`), set `"vermicompostGuide": ""` and `"carbonNitrogenBalance": ""` (leave both empty) and focus `"recommendedMethod"` and `"homeCompostingSteps"` strictly on safe disposal, recycling preparation, or authorized drop-off.
+
+        Return ONLY a raw JSON object (no markdown fences, no extra text) with the following fields:
+        {
+          "itemName": "Specific name of the waste item",
+          "category": "Organic Waste / Plastic Waste / Paper & Cardboard / Metal Waste / Glass Waste / E-Waste / Hazardous Waste / General Landfill",
+          "binType": "Organic / Compost (Green Bin) OR Recyclable (Blue Bin) OR E-Waste (Yellow/Orange Bin) OR Hazardous Waste (Red Bin) OR General / Landfill (Grey Bin)",
+          "isOrganicDecomposable": true,
+          "decompositionTimeframe": "Estimated time to decompose or persist in environment (e.g., '2–4 Weeks (Compost / Vermicompost)' or '450 Years in Landfill')",
+          "recommendedMethod": "Best disposal or decomposition method",
+          "vermicompostGuide": "ONLY if isOrganicDecomposable is true: practical natural decomposition & vermicomposting / home composting idea. If isOrganicDecomposable is false: return empty string \"\".",
+          "homeCompostingSteps": [
+            "Step 1: Actionable preparation or decomposition step",
+            "Step 2: Next step for composting (if decomposable) or recycling/safe disposal (if non-decomposable)",
+            "Step 3: Final step"
+          ],
+          "carbonNitrogenBalance": "ONLY if isOrganicDecomposable is true: C:N Ratio & Green/Brown balance advice. If isOrganicDecomposable is false: return empty string \"\".",
+          "nutrientOrEcoValue": "Soil fertilizer benefit (if decomposable) or environmental recycling impact (if non-decomposable)",
+          "precautionsAndDonts": [
+            "Precaution 1",
+            "Precaution 2"
+          ]
+        }
+      """.trimIndent()
+
+      val requestJson = JSONObject().apply {
+        val contentsArray = JSONArray()
+        val contentObj = JSONObject()
+        val partsArray = JSONArray()
+        partsArray.put(JSONObject().put("text", prompt))
+        contentObj.put("parts", partsArray)
+        contentsArray.put(contentObj)
+        put("contents", contentsArray)
+        put("generationConfig", JSONObject().apply {
+          put("temperature", 0.25)
+          put("topP", 0.95)
+        })
+      }
+
+      val requestBody = requestJson.toString().toRequestBody("application/json".toMediaType())
+      val request = Request.Builder()
+        .url("$BASE_URL?key=$apiKey")
+        .post(requestBody)
+        .build()
+
+      val response = client.newCall(request).execute()
+      val responseString = response.body?.string()
+
+      if (!response.isSuccessful || responseString.isNullOrBlank()) {
+        return@withContext generateDecompositionFallback(cleanQuery)
+      }
+
+      val rootJson = JSONObject(responseString)
+      val textResponse = rootJson
+        .optJSONArray("candidates")
+        ?.optJSONObject(0)
+        ?.optJSONObject("content")
+        ?.optJSONArray("parts")
+        ?.optJSONObject(0)
+        ?.optString("text")
+        .orEmpty()
+
+      parseDecompositionJson(textResponse, cleanQuery)
+        ?: generateDecompositionFallback(cleanQuery)
+    } catch (_: Exception) {
+      generateDecompositionFallback(cleanQuery)
+    }
+  }
+
+  private fun parseDecompositionJson(rawText: String, queryFallback: String): WasteDisposalGuideResult? {
+    return try {
+      val cleaned = rawText.trim()
+        .removePrefix("```json")
+        .removePrefix("```")
+        .removeSuffix("```")
+        .trim()
+
+      val json = JSONObject(cleaned)
+      val itemName = json.optString("itemName", queryFallback)
+      val category = json.optString("category", "General Waste")
+      val binStr = json.optString("binType", "Recyclable (Blue Bin)")
+      val binType = WasteBinType.fromCategory(category, binStr)
+      val isOrganic = json.optBoolean("isOrganicDecomposable", binType == WasteBinType.ORGANIC_GREEN)
+      val timeframe = json.optString(
+        "decompositionTimeframe",
+        if (isOrganic) "2–5 Weeks (Natural Decomposition)" else "Non-Biodegradable"
+      )
+      val method = json.optString(
+        "recommendedMethod",
+        if (isOrganic) "Home Composting / Vermicomposting" else "Segregated Bin Disposal & Recycling"
+      )
+      val vermiGuide = if (isOrganic) {
+        json.optString(
+          "vermicompostGuide",
+          "Chop into small pieces and layer with dry leaves or cocopeat for aerobic composting or earthworm vermicomposting."
+        )
+      } else {
+        ""
+      }
+
+      val stepsArray = json.optJSONArray("homeCompostingSteps")
+      val steps = mutableListOf<String>()
+      if (stepsArray != null) {
+        for (i in 0 until stepsArray.length()) {
+          val step = stepsArray.optString(i).trim()
+          if (step.isNotEmpty()) steps.add(step)
+        }
+      }
+
+      val cnBalance = if (isOrganic) {
+        json.optString(
+          "carbonNitrogenBalance",
+          "Mix 1 part nitrogen-rich green waste with 2–3 parts dry carbon browns (dry leaves, cocopeat, shredded paper)."
+        )
+      } else {
+        ""
+      }
+      val nutrientValue = json.optString(
+        "nutrientOrEcoValue",
+        if (isOrganic) {
+          "Decomposes into nutrient-rich humus that improves soil fertility."
+        } else {
+          "Proper segregation prevents landfill contamination and supports material recovery."
+        }
+      )
+
+      val dontsArray = json.optJSONArray("precautionsAndDonts")
+      val donts = mutableListOf<String>()
+      if (dontsArray != null) {
+        for (i in 0 until dontsArray.length()) {
+          val d = dontsArray.optString(i).trim()
+          if (d.isNotEmpty()) donts.add(d)
+        }
+      }
+
+      WasteDisposalGuideResult(
+        itemName = itemName,
+        binType = binType,
+        isOrganicDecomposable = isOrganic,
+        decompositionTimeframe = timeframe,
+        recommendedMethod = method,
+        vermicompostGuide = vermiGuide,
+        homeCompostingSteps = if (steps.isNotEmpty()) steps else if (isOrganic) {
+          listOf(
+            "Chop item into small pieces for faster microbial breakdown.",
+            "Layer with dry brown leaves or cocopeat in a compost or vermicompost bin.",
+            "Maintain light moisture and aerate weekly until converted into soil compost."
+          )
+        } else {
+          listOf(
+            "Clean and empty any residual contents before disposal.",
+            "Keep separate from wet organic kitchen waste.",
+            "Place in the designated ${binType.title}."
+          )
+        },
+        carbonNitrogenBalance = cnBalance,
+        nutrientOrEcoValue = nutrientValue,
+        precautionsAndDonts = if (donts.isNotEmpty()) donts else listOf(
+          "Do not mix with incompatible waste streams.",
+          "Follow local municipal sorting guidelines."
+        )
+      )
+    } catch (_: Exception) {
+      null
+    }
+  }
+
+  fun generateDecompositionFallback(itemQuery: String): WasteDisposalGuideResult {
+    val q = itemQuery.trim()
+    val lower = q.lowercase()
+    val displayTitle = q.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+
+    return when {
+      // 1. Non-decomposable: Plastic, bottle, wrapper, polythene, styrofoam, rubber, footwear, pen, toy, synthetic
+      lower.contains("plastic") || lower.contains("bottle") || lower.contains("polythene") ||
+        lower.contains("wrapper") || lower.contains("bag") || lower.contains("styrofoam") ||
+        lower.contains("thermocol") || lower.contains("cup") || lower.contains("straw") ||
+        lower.contains("pvc") || lower.contains("pet") || lower.contains("hdpe") ||
+        lower.contains("container") || lower.contains("packet") || lower.contains("pouch") ||
+        lower.contains("pen") || lower.contains("toy") || lower.contains("nylon") -> {
+        val isMultiLayer = lower.contains("wrapper") || lower.contains("chip") ||
+          lower.contains("styrofoam") || lower.contains("thermocol") ||
+          lower.contains("packet") || lower.contains("pouch")
+        WasteDisposalGuideResult(
+          itemName = "$displayTitle (Synthetic Polymer)",
+          binType = if (isMultiLayer) WasteBinType.LANDFILL_GREY else WasteBinType.RECYCLABLE_BLUE,
+          isOrganicDecomposable = false,
+          decompositionTimeframe = "450 – 1,000+ Years (Non-Biodegradable)",
+          recommendedMethod = if (isMultiLayer) {
+            "Dry Waste Segregation / Eco-Brick Compaction"
+          } else {
+            "Dry Polymer Recycling via Blue Bin"
+          },
+          vermicompostGuide = "",
+          homeCompostingSteps = listOf(
+            "Step 1 (Empty & Rinse): Empty all liquid or food residue and rinse clean so it does not contaminate other dry recyclables.",
+            "Step 2 (Dry Completely): Shake dry and crush/flatten plastic bottles to save bin volume.",
+            "Step 3 (Segregated Disposal): Place rigid recyclable plastics (#1 PET, #2 HDPE, #5 PP) in the Blue Recyclable Bin, or pack clean multi-layer wrappers into an Eco-Brick."
+          ),
+          carbonNitrogenBalance = "",
+          nutrientOrEcoValue = "Recycling 1 kg of plastic saves ~1.5 kg of CO2 emissions and prevents microplastic pollution in soil and waterways.",
+          precautionsAndDonts = listOf(
+            "Never burn plastic waste—it releases toxic dioxins and furans into the air.",
+            "Keep out of Green Organic bins as plastics do not decompose."
+          )
+        )
+      }
+
+      // 2. Non-decomposable: Metal, aluminum, can, tin, foil, steel, iron, copper, wire, utensil
+      lower.contains("metal") || lower.contains("can") || lower.contains("aluminum") ||
+        lower.contains("aluminium") || lower.contains("tin") || lower.contains("foil") ||
+        lower.contains("steel") || lower.contains("iron") || lower.contains("copper") ||
+        lower.contains("brass") || lower.contains("utensil") -> {
+        WasteDisposalGuideResult(
+          itemName = "$displayTitle (Recyclable Metal)",
+          binType = WasteBinType.RECYCLABLE_BLUE,
+          isOrganicDecomposable = false,
+          decompositionTimeframe = "200 – 500 Years (Non-Biodegradable Metal)",
+          recommendedMethod = "Scrap Metal Recovery & Smelting (Blue Bin)",
+          vermicompostGuide = "",
+          homeCompostingSteps = listOf(
+            "Step 1 (Rinse Clean): Wash out any food or beverage residue from the metal item.",
+            "Step 2 (Safe Handling): Tuck sharp tin lids inside the can to prevent injury to sanitation workers.",
+            "Step 3 (Deposit in Blue Bin): Place in the Blue Recyclable Bin or hand over to a local scrap metal recovery center."
+          ),
+          carbonNitrogenBalance = "",
+          nutrientOrEcoValue = "Aluminum and steel can be recycled infinitely, saving up to 95% of the energy required to mine virgin ore.",
+          precautionsAndDonts = listOf(
+            "Keep pressurized aerosol cans and paint tins separate (dispose as Hazardous Red Bin waste).",
+            "Wipe food grease off aluminum foil before recycling."
+          )
+        )
+      }
+
+      // 3. Non-decomposable: Glass, jar, mirror, ceramic, porcelain, plate, tile
+      lower.contains("glass") || lower.contains("jar") || lower.contains("mirror") ||
+        lower.contains("ceramic") || lower.contains("porcelain") || lower.contains("crockery") -> {
+        val isCeramic = lower.contains("ceramic") || lower.contains("porcelain") || lower.contains("crockery")
+        WasteDisposalGuideResult(
+          itemName = "$displayTitle (${if (isCeramic) "Ceramic / Inert Waste" else "Silica Glass"})",
+          binType = if (isCeramic) WasteBinType.LANDFILL_GREY else WasteBinType.RECYCLABLE_BLUE,
+          isOrganicDecomposable = false,
+          decompositionTimeframe = "Non-Biodegradable (Inert Mineral Material)",
+          recommendedMethod = if (isCeramic) {
+            "Safe Wrapped Inert Disposal / Upcycling as Planter Drainage"
+          } else {
+            "Cullet Glass Remelting & Container Reuse (Blue Bin)"
+          },
+          vermicompostGuide = "",
+          homeCompostingSteps = listOf(
+            "Step 1 (Empty & Rinse): Remove any food, pickle, or liquid residues.",
+            "Step 2 (Separate Caps): Remove metal or plastic lids and recycle them in their respective streams.",
+            "Step 3 (Dispose Safely): Place intact glass jars/bottles in the Blue Recyclable Bin. Wrap broken shards in thick newspaper and mark 'CAUTION: GLASS'."
+          ),
+          carbonNitrogenBalance = "",
+          nutrientOrEcoValue = "Glass is 100% recyclable endlessly without loss of purity or strength, reducing silica sand mining.",
+          precautionsAndDonts = listOf(
+            "Always wrap broken glass or ceramic pieces in thick cardboard before disposal so handlers are not injured.",
+            "Do not mix ceramic mugs or mirrors with container glass recycling."
+          )
+        )
+      }
+
+      // 4. Non-decomposable: E-Waste & Hazardous (Battery, phone, bulb, medicine, chemical, paint, charger, cable, sanitary, diaper)
+      lower.contains("battery") || lower.contains("phone") || lower.contains("cable") ||
+        lower.contains("charger") || lower.contains("electronic") || lower.contains("laptop") ||
+        lower.contains("bulb") || lower.contains("tube") || lower.contains("paint") ||
+        lower.contains("medicine") || lower.contains("tablet") || lower.contains("chemical") ||
+        lower.contains("syringe") || lower.contains("bleach") || lower.contains("pesticide") ||
+        lower.contains("computer") || lower.contains("mouse") || lower.contains("keyboard") ||
+        lower.contains("earphone") || lower.contains("headphone") -> {
+        val isHazard = lower.contains("battery") || lower.contains("paint") ||
+          lower.contains("medicine") || lower.contains("chemical") || lower.contains("bulb") ||
+          lower.contains("syringe") || lower.contains("bleach") || lower.contains("pesticide")
+        WasteDisposalGuideResult(
+          itemName = "$displayTitle (${if (isHazard) "Hazardous Waste" else "Electronic E-Waste"})",
+          binType = if (isHazard) WasteBinType.HAZARDOUS_RED else WasteBinType.E_WASTE_YELLOW,
+          isOrganicDecomposable = false,
+          decompositionTimeframe = "Non-Biodegradable (Toxic Heavy Metal & Chemical Leaching Risk)",
+          recommendedMethod = if (isHazard) {
+            "Certified Hazardous Waste Drop-Off (Red Bin)"
+          } else {
+            "Authorized E-Waste Dismantler & Precious Metal Recovery (Yellow Bin)"
+          },
+          vermicompostGuide = "",
+          homeCompostingSteps = listOf(
+            "Step 1 (Isolate Safely): Keep stored in a dry container away from regular household garbage.",
+            "Step 2 (Terminal / Leak Protection): Tape battery terminals with electrical tape to prevent short-circuit sparks, or seal chemical containers tightly.",
+            "Step 3 (Authorized Drop-Off): Deliver to a certified E-Waste or Hazardous Collection Center shown in the Eco Map tab."
+          ),
+          carbonNitrogenBalance = "",
+          nutrientOrEcoValue = "Safe recovery prevents toxic groundwater contamination and reclaims valuable copper, lithium, cobalt, and rare-earth metals.",
+          precautionsAndDonts = listOf(
+            "Never puncture, crush, or burn lithium-ion batteries or aerosol cans.",
+            "Never flush expired medicines or pour chemical solvents down household drains."
+          )
+        )
+      }
+
+      // 5. Non-decomposable Sanitary / Landfill Residuals (Diaper, mask, wipe, sponge, rubber, tire, shoe, cloth)
+      lower.contains("diaper") || lower.contains("sanitary") || lower.contains("mask") ||
+        lower.contains("wipe") || lower.contains("sponge") || lower.contains("rubber") ||
+        lower.contains("tire") || lower.contains("tyre") || lower.contains("shoe") ||
+        lower.contains("toothbrush") || lower.contains("razor") || lower.contains("cigarette") -> {
+        val isBioHazard = lower.contains("diaper") || lower.contains("sanitary") || lower.contains("mask") || lower.contains("razor")
+        WasteDisposalGuideResult(
+          itemName = "$displayTitle (Non-Recyclable Residual Waste)",
+          binType = if (isBioHazard) WasteBinType.HAZARDOUS_RED else WasteBinType.LANDFILL_GREY,
+          isOrganicDecomposable = false,
+          decompositionTimeframe = "100 – 500 Years (Non-Biodegradable Synthetic Composite)",
+          recommendedMethod = if (isBioHazard) {
+            "Wrapped Sanitary / Bio-Medical Waste Disposal (Red Bin)"
+          } else {
+            "Segregated Dry Residual / Landfill Disposal (Grey Bin)"
+          },
+          vermicompostGuide = "",
+          homeCompostingSteps = listOf(
+            "Step 1 (Wrap Securely): Wrap sanitary items, masks, or sharp razors in newspaper or a marked paper pouch.",
+            "Step 2 (Keep Dry & Separate): Do not mix with recyclable paper/plastics or organic kitchen waste.",
+            "Step 3 (Designated Bin): Place in the ${if (isBioHazard) "Red Hazardous / Sanitary Bin" else "Grey General Landfill Bin"}."
+          ),
+          carbonNitrogenBalance = "",
+          nutrientOrEcoValue = "Proper containment protects sanitation workers from bio-hazards and prevents contamination of recyclable streams.",
+          precautionsAndDonts = listOf(
+            "Never flush wipes, sanitary pads, or diapers down toilets.",
+            "Do not throw loose masks or sharp blades unwrapped into open bins."
+          )
+        )
+      }
+
+      // 6. Decomposable: Cooked food, rice, bread, dairy, curry, citrus, onion/garlic
+      lower.contains("rice") || lower.contains("cooked") || lower.contains("curry") ||
+        lower.contains("bread") || lower.contains("roti") || lower.contains("idli") ||
+        lower.contains("dosa") || lower.contains("sambar") || lower.contains("dairy") ||
+        lower.contains("milk") || lower.contains("cheese") || lower.contains("meat") ||
+        lower.contains("lemon") || lower.contains("citrus") || lower.contains("orange") ||
+        lower.contains("onion") || lower.contains("garlic") -> {
+        WasteDisposalGuideResult(
+          itemName = "$displayTitle (Decomposable Organic Food)",
+          binType = WasteBinType.ORGANIC_GREEN,
+          isOrganicDecomposable = true,
+          decompositionTimeframe = "2 Weeks (Bokashi Fermentation) + 3–4 Weeks (Soil / Vermicompost Curing)",
+          recommendedMethod = "Bokashi Anaerobic Fermentation + Secondary Vermicomposting / Trench Composting",
+          vermicompostGuide = "Decomposition & Vermicompost Idea: Avoid adding oily, salted, or acidic cooked food directly onto live earthworms at first. Pre-compost '$displayTitle' for 7–10 days in a covered pot with dry cocopeat/buttermilk or Bokashi bran until heat and acidity subside, then earthworms can safely convert it into nutrient-rich vermicompost.",
+          homeCompostingSteps = listOf(
+            "Step 1 (Drain Excess Liquid): Drain excess oil, salt water, or gravy from '$displayTitle' before composting.",
+            "Step 2 (Pre-Compost / Bokashi): Mix with 3 parts dry cocopeat or sawdust and a spoon of sour curd/buttermilk starter in a covered composter for 10 days.",
+            "Step 3 (Soil or Worm Integration): Once pre-digested, bury in a garden trench or introduce into a vermicompost bed under 2 inches of moist cocopeat.",
+            "Step 4 (Harvest Fertilizer): Within 3–4 weeks, it breaks down into dark, odor-free organic manure."
+          ),
+          carbonNitrogenBalance = "High-Nitrogen 'Green' (C:N ~15:1) — Mix 1 part food waste with 3 parts dry Carbon 'Browns' (dry leaves, cocopeat, or cardboard shreds) to prevent odor.",
+          nutrientOrEcoValue = "Rich in Nitrogen (N), amino acids, and beneficial microbes; boosts plant growth while preventing landfill methane.",
+          precautionsAndDonts = listOf(
+            "Always cover cooked food under 2–3 inches of dry cocopeat or dry leaves to prevent fruit flies.",
+            "Keep heavy cooking oils and excess salt out of live earthworm beds."
+          )
+        )
+      }
+
+      // 7. Decomposable: Coffee grounds, tea leaves
+      lower.contains("coffee") || lower.contains("tea") || lower.contains("chai") -> {
+        WasteDisposalGuideResult(
+          itemName = "$displayTitle (Decomposable Organic Grounds)",
+          binType = WasteBinType.ORGANIC_GREEN,
+          isOrganicDecomposable = true,
+          decompositionTimeframe = "2–3 Weeks in Vermicompost / 4 Weeks in Home Compost",
+          recommendedMethod = "Direct Vermicomposting & Aerobic Pot Composting",
+          vermicompostGuide = "Decomposition & Vermicompost Idea: '$displayTitle' is naturally biodegradable and ideal for earthworm vermicomposting! The fine granular texture helps earthworms digest organic matter. Rinse out milk/sugar if any, and scatter a thin layer mixed with dry leaves or cocopeat.",
+          homeCompostingSteps = listOf(
+            "Step 1 (Remove Synthetic Bags): Tear open nylon tea bags and compost only the loose tea leaves (unbleached paper filters are compostable).",
+            "Step 2 (Quick Rinse): If brewed with milk and sugar, rinse the strained tea leaves with water so they don't attract ants.",
+            "Step 3 (Compost / Vermicompost): Mix 1 part '$displayTitle' with 2 parts dry brown leaves or cocopeat in your home compost or worm bin.",
+            "Step 4 (Use as Manure): Decomposes in 3–4 weeks into nitrogen-rich organic fertilizer for potted plants."
+          ),
+          carbonNitrogenBalance = "Nitrogen-Rich 'Green' (C:N ~20:1) — Balance 1 part grounds with 2 parts dry brown leaves or shredded paper.",
+          nutrientOrEcoValue = "Contains ~2% Nitrogen (N) plus Potassium and Magnesium; improves soil structure and moisture retention.",
+          precautionsAndDonts = listOf(
+            "Remove staple pins and synthetic mesh tea bags before composting.",
+            "Mix with dry browns rather than piling thick wet layers alone."
+          )
+        )
+      }
+
+      // 8. Decomposable: Eggshells
+      lower.contains("egg") || lower.contains("shell") -> {
+        WasteDisposalGuideResult(
+          itemName = "$displayTitle (Calcium Mineral Organic)",
+          binType = WasteBinType.ORGANIC_GREEN,
+          isOrganicDecomposable = true,
+          decompositionTimeframe = "3–6 Weeks (When Finely Crushed)",
+          recommendedMethod = "Crushed Compost / Vermicompost pH Buffer & Direct Soil Calcium Mix",
+          vermicompostGuide = "Decomposition & Vermicompost Idea: Rinse, sun-dry, and crush '$displayTitle' into a fine powder. Adding 1–2 spoons to a home compost or vermicompost bin neutralizes acidity (keeps pH 6.5–7.5) and adds essential calcium for plants and earthworms.",
+          homeCompostingSteps = listOf(
+            "Step 1 (Rinse & Sun-Dry): Rinse inner membrane residue and let shells dry completely.",
+            "Step 2 (Crush into Grit): Crush finely or grind into powder so it integrates quickly into soil.",
+            "Step 3 (Compost or Direct Soil Use): Sprinkle into your compost/vermicompost bin or mix directly into potting soil around tomato, chili, and rose plants."
+          ),
+          carbonNitrogenBalance = "Mineral Calcium Buffer (CaCO3) — Neutralizes excess acidity in organic kitchen waste compost.",
+          nutrientOrEcoValue = "95% Calcium Carbonate plus trace minerals; prevents Blossom-End Rot in fruiting plants.",
+          precautionsAndDonts = listOf(
+            "Crush shells into small pieces—whole uncrushed shell halves take many months to break down."
+          )
+        )
+      }
+
+      // 9. Decomposable: Paper, cardboard, newspaper, carton, tissue, napkin
+      lower.contains("paper") || lower.contains("cardboard") || lower.contains("newspaper") ||
+        lower.contains("box") || lower.contains("carton") || lower.contains("tissue") ||
+        lower.contains("napkin") -> {
+        WasteDisposalGuideResult(
+          itemName = "$displayTitle (Biodegradable Cellulose Fiber)",
+          binType = if (lower.contains("tissue") || lower.contains("napkin") || lower.contains("soiled")) {
+            WasteBinType.ORGANIC_GREEN
+          } else {
+            WasteBinType.RECYCLABLE_BLUE
+          },
+          isOrganicDecomposable = true,
+          decompositionTimeframe = "3–5 Weeks (Shredded & Moistened in Compost)",
+          recommendedMethod = "Clean & Dry → Blue Recyclable Bin | Shredded/Soiled → Compost Carbon Bedding",
+          vermicompostGuide = "Decomposition & Composting Idea: Because '$displayTitle' is made of natural plant cellulose, uncoated/unbleached paper and cardboard decompose naturally! Shred into 1-inch strips, dampen with water, and mix as the Carbon 'Brown' bedding layer in home composting or vermicomposting.",
+          homeCompostingSteps = listOf(
+            "Option A (Recycle if Clean): If clean and dry, remove plastic tape, flatten, and place in the Blue Recyclable Bin.",
+            "Option B (Decompose if Soiled/Shredded): Tear uncoated paper, napkins, or cardboard into small strips.",
+            "Step 3 (Balance Wet Waste): Mix 2–3 parts shredded paper with 1 part wet fruit/vegetable scraps in your compost or vermicompost bin to absorb excess moisture."
+          ),
+          carbonNitrogenBalance = "High-Carbon 'Brown' (C:N ~150:1) — Excellent dry carbon source to balance wet kitchen scraps.",
+          nutrientOrEcoValue = "Recycling saves 17 trees per ton; composting shredded unbleached paper creates airy, moisture-balanced humus.",
+          precautionsAndDonts = listOf(
+            "Do not compost glossy plastic-laminated boxes, BPA thermal receipts, or химиcally bleached/waxed cups.",
+            "Peel off all plastic packing tape and labels first."
+          )
+        )
+      }
+
+      // 10. Default Decomposable Organic / Food / Fruit / Vegetable / Plant Waste
+      else -> {
+        WasteDisposalGuideResult(
+          itemName = "$displayTitle (Biodegradable Organic Waste)",
+          binType = WasteBinType.ORGANIC_GREEN,
+          isOrganicDecomposable = true,
+          decompositionTimeframe = "2–4 Weeks (Vermicompost) / 4–6 Weeks (Aerobic Home Compost)",
+          recommendedMethod = "Home Aerobic Composting or Earthworm Vermicomposting (Green Bin)",
+          vermicompostGuide = "Decomposition & Vermicompost Idea: Since '$displayTitle' is biodegradable organic matter, you can turn it into natural plant fertilizer! Chop into 1–2 cm pieces and layer under moist cocopeat or dry leaves in an aerobic compost pot or Red Wiggler earthworm vermicompost bin.",
+          homeCompostingSteps = listOf(
+            "Step 1 (Chop & Prep): Remove any non-biodegradable stickers or packaging and chop '$displayTitle' into small pieces for faster microbial breakdown.",
+            "Step 2 (Green & Brown Layering): In a ventilated compost bin or pot, add 1 part '$displayTitle' (Green) and cover with 2–3 parts dry leaves, cocopeat, or shredded paper (Brown).",
+            "Step 3 (Microbial or Worm Action): Keep damp like a wrung-out sponge and aerate weekly (or let composting earthworms process the bed).",
+            "Step 4 (Harvest Compost): In 3–6 weeks, sieve the dark, earthy compost to enrich your garden or indoor plants."
+          ),
+          carbonNitrogenBalance = "Nitrogen-Rich 'Green' (C:N ~20:1) — Pair 1 part '$displayTitle' with 2–3 parts dry Carbon 'Browns' (dry leaves, cocopeat, or cardboard) for odor-free decomposition.",
+          nutrientOrEcoValue = "Converts organic waste into nutrient-rich humus packed with NPK and beneficial soil microbes.",
+          precautionsAndDonts = listOf(
+            "Always cover fresh organic scraps with a layer of dry leaves or cocopeat to prevent fruit flies.",
+            "Do not mix plastic bags or synthetic wrappers into the Green Bin."
+          )
+        )
+      }
+    }
+  }
 }
+

@@ -180,9 +180,12 @@ fun HistoryScreen(
             Button(
               onClick = { viewModel.setActiveTab(WasteAppTab.SCAN_CLASSIFY) },
               shape = RoundedCornerShape(16.dp),
-              colors = ButtonDefaults.buttonColors(containerColor = SleekGreenPrimary)
+              colors = ButtonDefaults.buttonColors(
+                containerColor = SleekGreenPrimary,
+                contentColor = Color.White
+              )
             ) {
-              Text("Start Segregating", fontWeight = FontWeight.SemiBold)
+              Text("Start Segregating", color = Color.White, fontWeight = FontWeight.SemiBold)
             }
           }
         }

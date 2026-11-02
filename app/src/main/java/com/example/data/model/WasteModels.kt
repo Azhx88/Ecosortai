@@ -154,3 +154,17 @@ data class UserLocationState(
   val addressLabel: String = "Current Location (Downtown)",
   val isCustomAddress: Boolean = false
 )
+
+data class WasteDisposalGuideResult(
+  val itemName: String,
+  val binType: WasteBinType,
+  val isOrganicDecomposable: Boolean,
+  val decompositionTimeframe: String,
+  val recommendedMethod: String,
+  val vermicompostGuide: String,
+  val homeCompostingSteps: List<String>,
+  val carbonNitrogenBalance: String,
+  val nutrientOrEcoValue: String,
+  val precautionsAndDonts: List<String>
+)
+

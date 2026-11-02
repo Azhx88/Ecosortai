@@ -135,6 +135,14 @@ class WasteRepository(context: Context) {
 
   fun getAllRecyclingCenters(): List<RecyclingCenter> = Companion.getAllRecyclingCenters()
 
+  fun getRecyclingCentersNear(
+    userLat: Double,
+    userLon: Double,
+    areaLabel: String = "",
+    localAddresses: Map<String, String> = emptyMap()
+  ): List<RecyclingCenter> =
+    Companion.getRecyclingCentersNear(userLat, userLon, areaLabel, localAddresses)
+
   fun calculateDistanceMiles(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
     Companion.calculateDistanceMiles(lat1, lon1, lat2, lon2)
 
@@ -146,6 +154,80 @@ class WasteRepository(context: Context) {
     Companion.getSuggestedCenterFor(classification, userLat, userLon)
 
   companion object {
+    private const val DEFAULT_BASE_LAT = 37.7749
+    private const val DEFAULT_BASE_LON = -122.4194
+
+    fun getRecyclingCentersNear(
+      userLat: Double,
+      userLon: Double,
+      areaLabel: String = "",
+      localAddresses: Map<String, String> = emptyMap()
+    ): List<RecyclingCenter> {
+      val baseCenters = getAllRecyclingCenters()
+      val cleanArea = areaLabel
+        .replace("Current Location", "", ignoreCase = true)
+        .replace("Current GPS", "", ignoreCase = true)
+        .replace("GPS", "", ignoreCase = true)
+        .replace("(", "")
+        .replace(")", "")
+        .trim()
+        .trim(',', ' ')
+
+      val isDefaultDemoArea = cleanArea.isEmpty() ||
+        cleanArea.equals("Downtown", ignoreCase = true) ||
+        cleanArea.equals("Downtown Central", ignoreCase = true) ||
+        (kotlin.math.abs(userLat - DEFAULT_BASE_LAT) < 0.001 &&
+          kotlin.math.abs(userLon - DEFAULT_BASE_LON) < 0.001)
+
+      val cityShort = cleanArea.substringAfterLast(",").trim().ifEmpty {
+        cleanArea.substringBefore(",").trim().ifEmpty { "Local" }
+      }
+
+      return baseCenters.map { center ->
+        val latOffset = center.latitude - DEFAULT_BASE_LAT
+        val lonOffset = center.longitude - DEFAULT_BASE_LON
+        val targetLat = userLat + latOffset
+        val targetLon = userLon + lonOffset
+
+        if (isDefaultDemoArea && localAddresses.isEmpty()) {
+          center.copy(
+            latitude = targetLat,
+            longitude = targetLon
+          )
+        } else {
+          val geocodedStreet = localAddresses[center.id]
+          val areaDisplay = geocodedStreet?.takeIf { it.isNotBlank() }
+            ?: if (cleanArea.isNotEmpty()) {
+              "$cleanArea (${String.format(java.util.Locale.US, "%.4f, %.4f", targetLat, targetLon)})"
+            } else {
+              String.format(java.util.Locale.US, "Lat %.4f, Lon %.4f", targetLat, targetLon)
+            }
+
+          val subAreaName = geocodedStreet
+            ?.substringBefore(",")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() && !it.startsWith("Lat ") }
+            ?: cityShort
+
+          val localizedName = when (center.id) {
+            "CENTER-01" -> "$subAreaName Municipal Material Recovery (MRF)"
+            "CENTER-02" -> "$subAreaName Hazardous & Battery Drop-Off Hub"
+            "CENTER-03" -> "$subAreaName Micro-Composting & Organic Center"
+            "CENTER-04" -> "$subAreaName Authorized E-Waste & Tech Hub"
+            "CENTER-05" -> "$subAreaName Scrap Metal, Plastic & Paper Depot"
+            else -> "$subAreaName ${center.name}"
+          }
+
+          center.copy(
+            name = localizedName,
+            latitude = targetLat,
+            longitude = targetLon,
+            address = areaDisplay
+          )
+        }
+      }
+    }
+
     fun getAllRecyclingCenters(): List<RecyclingCenter> {
     return listOf(
       RecyclingCenter(
@@ -366,7 +448,7 @@ class WasteRepository(context: Context) {
     userLat: Double,
     userLon: Double
   ): Pair<RecyclingCenter, Double> {
-    val centers = getAllRecyclingCenters()
+    val centers = getRecyclingCentersNear(userLat, userLon)
     // First try exact specialty match
     val specialtyMatch = centers.filter { it.primarySpecialty == classification.binType }
     val candidateCenters = if (specialtyMatch.isNotEmpty()) {
@@ -390,7 +472,7 @@ class WasteRepository(context: Context) {
     userLon: Double
   ): Pair<RecyclingCenter, Double> {
     val binType = WasteBinType.fromCategory(category, "")
-    val centers = getAllRecyclingCenters()
+    val centers = getRecyclingCentersNear(userLat, userLon)
     val specialtyMatch = centers.filter { it.primarySpecialty == binType }
     val candidateCenters = if (specialtyMatch.isNotEmpty()) {
       specialtyMatch

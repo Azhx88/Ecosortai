@@ -991,7 +991,10 @@ fun ScanClassifierScreen(
                 Button(
                   onClick = { viewModel.navigateToCenterOnMap(center.id) },
                   shape = RoundedCornerShape(16.dp),
-                  colors = ButtonDefaults.buttonColors(containerColor = SereneOceanBlue),
+                  colors = ButtonDefaults.buttonColors(
+                    containerColor = SereneOceanBlue,
+                    contentColor = Color.White
+                  ),
                   modifier = Modifier
                     .fillMaxWidth()
                     .testTag("btn_view_on_map")
@@ -999,11 +1002,13 @@ fun ScanClassifierScreen(
                   Icon(
                     imageVector = Icons.Default.Map,
                     contentDescription = null,
+                    tint = Color.White,
                     modifier = Modifier.size(16.dp)
                   )
                   Spacer(modifier = Modifier.width(8.dp))
                   Text(
                     text = "View on Recycling Map & Directions",
+                    color = Color.White,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 13.sp
                   )

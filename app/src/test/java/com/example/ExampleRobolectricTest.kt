@@ -87,4 +87,19 @@ class ExampleRobolectricTest {
       plasticMatch.first.primarySpecialty == WasteBinType.RECYCLABLE_BLUE
     )
   }
+
+  @Test
+  fun `verify decomposition guide only provides vermicompost idea when item is decomposable`() {
+    val bananaGuide = com.example.data.api.GeminiApiService.generateDecompositionFallback("Banana Peel")
+    assertTrue(bananaGuide.isOrganicDecomposable)
+    assertTrue(bananaGuide.vermicompostGuide.isNotBlank())
+
+    val plasticGuide = com.example.data.api.GeminiApiService.generateDecompositionFallback("Plastic Bottle")
+    assertEquals(false, plasticGuide.isOrganicDecomposable)
+    assertTrue(plasticGuide.vermicompostGuide.isEmpty())
+
+    val batteryGuide = com.example.data.api.GeminiApiService.generateDecompositionFallback("AA Battery")
+    assertEquals(false, batteryGuide.isOrganicDecomposable)
+    assertTrue(batteryGuide.vermicompostGuide.isEmpty())
+  }
 }

@@ -1,9 +1,19 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -23,6 +33,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -88,6 +99,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -104,16 +116,24 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.api.OpenStreetMapService
 import com.example.data.model.RecyclingCenter
 import com.example.data.model.WasteBinType
+import java.util.Locale
+import kotlin.math.floor
+import kotlin.math.hypot
 import com.example.ui.theme.CalmSage
 import com.example.ui.theme.DeepRiverBlue
 import com.example.ui.theme.EucalyptusGreen
@@ -158,6 +178,53 @@ fun RecyclingCentersMapScreen(
   val selectedCenter = selectedPair?.first
 
   var showAddressDialog by remember { mutableStateOf(false) }
+
+  val locationPermissionLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.RequestMultiplePermissions()
+  ) { permissions ->
+    val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true
+    val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+    if (fineGranted || coarseGranted) {
+      viewModel.requestDeviceLocation()
+    } else {
+      Toast.makeText(
+        context,
+        "Location permission denied. Using selected district coordinates.",
+        Toast.LENGTH_SHORT
+      ).show()
+    }
+  }
+
+  val requestCurrentGpsLocation = {
+    val hasFine = ContextCompat.checkSelfPermission(
+      context,
+      Manifest.permission.ACCESS_FINE_LOCATION
+    ) == PackageManager.PERMISSION_GRANTED
+    val hasCoarse = ContextCompat.checkSelfPermission(
+      context,
+      Manifest.permission.ACCESS_COARSE_LOCATION
+    ) == PackageManager.PERMISSION_GRANTED
+
+    if (hasFine || hasCoarse) {
+      viewModel.requestDeviceLocation()
+    } else {
+      locationPermissionLauncher.launch(
+        arrayOf(
+          Manifest.permission.ACCESS_FINE_LOCATION,
+          Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+      )
+    }
+  }
+
+  // Automatically detect current location on initial open if still on default placeholder
+  LaunchedEffect(Unit) {
+    if (!uiState.userLocation.isCustomAddress &&
+      uiState.userLocation.addressLabel == "Current Location (Downtown)"
+    ) {
+      requestCurrentGpsLocation()
+    }
+  }
 
   // Auto scroll to top when a center is selected
   LaunchedEffect(uiState.selectedCenterId) {
@@ -279,13 +346,25 @@ fun RecyclingCentersMapScreen(
                     )
                   )
                   Text(
-                    text = uiState.userLocation.addressLabel,
+                    text = if (uiState.isLocating) "Detecting current GPS location..." else uiState.userLocation.addressLabel,
                     style = MaterialTheme.typography.bodyMedium.copy(
                       fontWeight = FontWeight.SemiBold,
                       color = SleekTextPrimary
                     ),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
+                  )
+                  Text(
+                    text = String.format(
+                      Locale.US,
+                      "Lat %.4f, Lon %.4f",
+                      uiState.userLocation.latitude,
+                      uiState.userLocation.longitude
+                    ),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                      fontSize = 10.sp,
+                      color = SleekTextSecondary
+                    )
                   )
                 }
               }
@@ -296,7 +375,7 @@ fun RecyclingCentersMapScreen(
                   color = SleekSurface,
                   border = BorderStroke(1.dp, SleekCardBorder),
                   modifier = Modifier
-                    .clickable { viewModel.requestDeviceLocation() }
+                    .clickable { requestCurrentGpsLocation() }
                     .testTag("btn_gps_location")
                 ) {
                   Row(
@@ -311,7 +390,7 @@ fun RecyclingCentersMapScreen(
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                      text = "GPS",
+                      text = if (uiState.isLocating) "..." else "GPS",
                       style = MaterialTheme.typography.labelSmall.copy(
                         fontWeight = FontWeight.Bold,
                         color = SereneOceanBlue
@@ -381,7 +460,7 @@ fun RecyclingCentersMapScreen(
         OutlinedTextField(
           value = uiState.centerSearchQuery,
           onValueChange = { viewModel.setCenterSearchQuery(it) },
-          placeholder = { Text("Search facility, materials (e.g., batteries, cans, boxes)...", fontSize = 13.sp) },
+          placeholder = { Text("Search facility, materials (e.g., batteries, cans, boxes)...", fontSize = 13.sp, color = SleekTextSecondary) },
           leadingIcon = {
             Icon(
               imageVector = Icons.Default.Search,
@@ -404,6 +483,11 @@ fun RecyclingCentersMapScreen(
           },
           shape = RoundedCornerShape(18.dp),
           colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = SleekTextPrimary,
+            unfocusedTextColor = SleekTextPrimary,
+            cursorColor = SleekGreenPrimary,
+            focusedPlaceholderColor = SleekTextSecondary,
+            unfocusedPlaceholderColor = SleekTextSecondary,
             focusedContainerColor = SleekSurface,
             unfocusedContainerColor = SleekSurface,
             focusedBorderColor = SleekGreenPrimary,
@@ -473,19 +557,30 @@ fun RecyclingCentersMapScreen(
     }
 
     // 4. Selected Facility Deep-Dive Details Card
-    if (selectedCenter != null && selectedPair != null) {
+    if (selectedCenter != null) {
       item {
         SelectedFacilityCard(
           center = selectedCenter,
           distanceMiles = selectedPair.second,
           onClose = { viewModel.selectRecyclingCenter(null) },
           onGetDirections = {
-            val geoUri = Uri.parse("geo:${selectedCenter.latitude},${selectedCenter.longitude}?q=${Uri.encode(selectedCenter.name + " " + selectedCenter.address)}")
+            val lat = selectedCenter.latitude
+            val lon = selectedCenter.longitude
+            val geoUri = Uri.parse("geo:$lat,$lon?q=$lat,$lon(${Uri.encode(selectedCenter.name)})")
             val mapIntent = Intent(Intent.ACTION_VIEW, geoUri)
             try {
               context.startActivity(mapIntent)
             } catch (e: Exception) {
-              Toast.makeText(context, "Navigating to ${selectedCenter.name} (${selectedPair.second} mi away)", Toast.LENGTH_SHORT).show()
+              try {
+                context.startActivity(
+                  Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("https://www.google.com/maps/search/?api=1&query=$lat,$lon")
+                  )
+                )
+              } catch (_: Exception) {
+                Toast.makeText(context, "Navigating to ${selectedCenter.name} (${selectedPair.second} mi away)", Toast.LENGTH_SHORT).show()
+              }
             }
           },
           onCallFacility = {
@@ -587,15 +682,7 @@ fun RecyclingCentersMapScreen(
         showAddressDialog = false
       },
       onCustomAddressEntered = { customText ->
-        // Generate a simulated coordinate around central area for arbitrary addresses
-        val randomOffsetLat = (customText.hashCode() % 100) / 10000.0
-        val randomOffsetLon = (customText.length % 100) / 10000.0
-        viewModel.updateUserLocation(
-          37.7749 + randomOffsetLat,
-          -122.4194 + randomOffsetLon,
-          customText.trim(),
-          true
-        )
+        viewModel.searchAndSetAddress(customText)
         showAddressDialog = false
       },
       onDismiss = { showAddressDialog = false }
@@ -616,10 +703,11 @@ fun RecyclingMapCard(
   zoomLevel: Float,
   onZoomChange: (Float) -> Unit
 ) {
+  val context = LocalContext.current
   val infiniteTransition = rememberInfiniteTransition(label = "pulse")
   val pulseRadius by infiniteTransition.animateFloat(
-    initialValue = 10f,
-    targetValue = 26f,
+    initialValue = 12f,
+    targetValue = 30f,
     animationSpec = infiniteRepeatable(
       animation = tween(1500, easing = FastOutSlowInEasing),
       repeatMode = RepeatMode.Restart
@@ -627,7 +715,7 @@ fun RecyclingMapCard(
     label = "radius"
   )
   val pulseAlpha by infiniteTransition.animateFloat(
-    initialValue = 0.6f,
+    initialValue = 0.55f,
     targetValue = 0.0f,
     animationSpec = infiniteRepeatable(
       animation = tween(1500, easing = FastOutSlowInEasing),
@@ -639,10 +727,106 @@ fun RecyclingMapCard(
   var panOffsetX by remember { mutableFloatStateOf(0f) }
   var panOffsetY by remember { mutableFloatStateOf(0f) }
 
+  // Default to Live OpenStreetMap (OSM) Tile Engine
+  var useOsmMapPreview by remember { mutableStateOf(true) }
+  var focusSelectedFacilityOnMap by remember { mutableStateOf(false) }
+
+  // Reset pan when user location changes
+  LaunchedEffect(userLocation.latitude, userLocation.longitude) {
+    panOffsetX = 0f
+    panOffsetY = 0f
+    focusSelectedFacilityOnMap = false
+  }
+
+  val osmZoom = remember(zoomLevel) {
+    (14 + ((zoomLevel - 1.0f) * 3f).roundToInt()).coerceIn(11, 17)
+  }
+
+  val selectedCenterObj = remember(centers, selectedCenterId) {
+    centers.find { it.id == selectedCenterId }
+  }
+
+  val targetLat = if (focusSelectedFacilityOnMap && selectedCenterObj != null) {
+    selectedCenterObj.latitude
+  } else {
+    userLocation.latitude
+  }
+  val targetLon = if (focusSelectedFacilityOnMap && selectedCenterObj != null) {
+    selectedCenterObj.longitude
+  } else {
+    userLocation.longitude
+  }
+
+  // Trigger real OpenStreetMap 256x256 PNG tile downloads in parallel for the current viewport
+  var loadedTileCount by remember { mutableIntStateOf(0) }
+  var tileRefreshTick by remember { mutableIntStateOf(0) }
+
+  LaunchedEffect(targetLat, targetLon, osmZoom, useOsmMapPreview) {
+    if (!useOsmMapPreview) return@LaunchedEffect
+    val visibleTiles = OpenStreetMapService.getVisibleTileIndices(
+      centerLat = targetLat,
+      centerLon = targetLon,
+      zoom = osmZoom,
+      radiusTiles = 2
+    )
+    var count = 0
+    visibleTiles.forEach { (tx, ty) ->
+      if (OpenStreetMapService.getCachedTile(osmZoom, tx, ty) != null) {
+        count++
+      }
+    }
+    loadedTileCount = count
+
+    visibleTiles.forEach { (tx, ty) ->
+      launch {
+        val bmp = OpenStreetMapService.fetchTileBitmap(osmZoom, tx, ty)
+        if (bmp != null) {
+          tileRefreshTick++
+          loadedTileCount = visibleTiles.count { (x, y) ->
+            OpenStreetMapService.getCachedTile(osmZoom, x, y) != null
+          }
+        }
+      }
+    }
+  }
+
+  // Paint objects for native canvas text labels on the map
+  val pinLabelPaint = remember {
+    android.graphics.Paint().apply {
+      isAntiAlias = true
+      color = android.graphics.Color.parseColor("#191C1A")
+      textSize = 27f
+      typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+    }
+  }
+  val pinSubLabelPaint = remember {
+    android.graphics.Paint().apply {
+      isAntiAlias = true
+      color = android.graphics.Color.parseColor("#2E6F40")
+      textSize = 23f
+      typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+    }
+  }
+  val pillBgPaint = remember {
+    android.graphics.Paint().apply {
+      isAntiAlias = true
+      color = android.graphics.Color.argb(238, 255, 255, 255)
+      style = android.graphics.Paint.Style.FILL
+    }
+  }
+  val pillBorderPaint = remember {
+    android.graphics.Paint().apply {
+      isAntiAlias = true
+      color = android.graphics.Color.parseColor("#C7D8CC")
+      style = android.graphics.Paint.Style.STROKE
+      strokeWidth = 2.5f
+    }
+  }
+
   Card(
     modifier = Modifier
       .fillMaxWidth()
-      .height(280.dp)
+      .height(320.dp)
       .testTag("recycling_map_container"),
     shape = RoundedCornerShape(28.dp),
     colors = CardDefaults.cardColors(containerColor = MapLandColor),
@@ -650,28 +834,68 @@ fun RecyclingMapCard(
     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
   ) {
     Box(modifier = Modifier.fillMaxSize()) {
-      // 1. Serene Vector Map Canvas
+      // 1. Native OpenStreetMap Slippy Tile Canvas + Vector Base + Interactive Pins
       Canvas(
         modifier = Modifier
           .fillMaxSize()
+          .testTag("osm_map_webview_preview")
+          .pointerInput(centers, targetLat, targetLon, osmZoom) {
+            detectTapGestures { tapOffset ->
+              val centerX = size.width / 2f + panOffsetX
+              val centerY = size.height / 2f + panOffsetY
+              val tileRenderPx = 380f
+              // Hit-test facility pins on tap
+              val tappedCenter = centers.minByOrNull { center ->
+                val pos = OpenStreetMapService.projectToCanvas(
+                  lat = center.latitude,
+                  lon = center.longitude,
+                  centerLat = targetLat,
+                  centerLon = targetLon,
+                  zoom = osmZoom,
+                  canvasCenterX = centerX,
+                  canvasCenterY = centerY,
+                  tileSizePx = tileRenderPx
+                )
+                hypot(tapOffset.x - pos.x, tapOffset.y - pos.y)
+              }
+              if (tappedCenter != null) {
+                val pos = OpenStreetMapService.projectToCanvas(
+                  lat = tappedCenter.latitude,
+                  lon = tappedCenter.longitude,
+                  centerLat = targetLat,
+                  centerLon = targetLon,
+                  zoom = osmZoom,
+                  canvasCenterX = centerX,
+                  canvasCenterY = centerY,
+                  tileSizePx = tileRenderPx
+                )
+                if (hypot(tapOffset.x - pos.x, tapOffset.y - pos.y) <= 68f) {
+                  onCenterSelected(tappedCenter.id)
+                }
+              }
+            }
+          }
           .pointerInput(Unit) {
             detectDragGestures { change, dragAmount ->
               change.consume()
-              panOffsetX = (panOffsetX + dragAmount.x).coerceIn(-180f, 180f)
-              panOffsetY = (panOffsetY + dragAmount.y).coerceIn(-140f, 140f)
+              panOffsetX = (panOffsetX + dragAmount.x).coerceIn(-260f, 260f)
+              panOffsetY = (panOffsetY + dragAmount.y).coerceIn(-200f, 200f)
             }
           }
       ) {
+        // Read tileRefreshTick so Compose redraws immediately as each OSM tile arrives
+        val _tick = tileRefreshTick
         val width = size.width
         val height = size.height
         val centerX = width / 2f + panOffsetX
         val centerY = height / 2f + panOffsetY
+        val tileRenderPx = 380f
+        val tileRenderInt = tileRenderPx.roundToInt() + 1
 
-        // Map Base Canvas
+        // --- LAYER A: Instant Vector Base Map (always visible underneath / while tiles load) ---
         drawRect(color = MapLandColor)
 
-        // Draw soft grid lines (streets / blocks)
-        val step = 42f * zoomLevel
+        val step = 46f * zoomLevel
         var gx = (centerX % step) - step
         while (gx < width + step) {
           drawLine(
@@ -693,7 +917,34 @@ fun RecyclingMapCard(
           gy += step
         }
 
-        // Draw Major Road Arteries (serene earthy curves)
+        // Green parks & waterway features
+        drawRoundRect(
+          color = MapParkColor,
+          topLeft = Offset(centerX - 140f * zoomLevel, centerY - 110f * zoomLevel),
+          size = Size(105f * zoomLevel, 70f * zoomLevel),
+          cornerRadius = CornerRadius(22f, 22f)
+        )
+        drawRoundRect(
+          color = MapParkColor,
+          topLeft = Offset(centerX + 55f * zoomLevel, centerY + 30f * zoomLevel),
+          size = Size(95f * zoomLevel, 65f * zoomLevel),
+          cornerRadius = CornerRadius(18f, 18f)
+        )
+
+        val riverPath = Path().apply {
+          moveTo(0f, centerY + 75f)
+          cubicTo(
+            centerX - 100f, centerY + 95f,
+            centerX + 35f, centerY - 20f,
+            width, centerY - 75f
+          )
+        }
+        drawPath(
+          path = riverPath,
+          color = MapWaterColor,
+          style = Stroke(width = 24f * zoomLevel)
+        )
+
         val mainRoadPath = Path().apply {
           moveTo(0f, centerY - 60f * zoomLevel)
           cubicTo(
@@ -722,112 +973,153 @@ fun RecyclingMapCard(
           style = Stroke(width = 12f * zoomLevel)
         )
 
-        // Draw Soft River Canal Feature (nature water tone)
-        val riverPath = Path().apply {
-          moveTo(0f, centerY + 70f)
-          cubicTo(
-            centerX - 100f, centerY + 90f,
-            centerX + 30f, centerY - 20f,
-            width, centerY - 70f
-          )
+        // --- LAYER B: Real OpenStreetMap 256x256 Raster PNG Tiles (when OSM mode active) ---
+        if (useOsmMapPreview) {
+          val exactCenterTileX = OpenStreetMapService.lonToTileX(targetLon, osmZoom)
+          val exactCenterTileY = OpenStreetMapService.latToTileY(targetLat, osmZoom)
+          val baseTileX = floor(exactCenterTileX).toInt()
+          val baseTileY = floor(exactCenterTileY).toInt()
+
+          for (dy in -2..2) {
+            for (dx in -2..2) {
+              val tx = baseTileX + dx
+              val ty = baseTileY + dy
+              val tileBitmap = OpenStreetMapService.getCachedTile(osmZoom, tx, ty)
+              if (tileBitmap != null) {
+                val leftPx = centerX + ((tx.toDouble() - exactCenterTileX) * tileRenderPx).toFloat()
+                val topPx = centerY + ((ty.toDouble() - exactCenterTileY) * tileRenderPx).toFloat()
+                if (leftPx + tileRenderPx >= 0f && leftPx <= width &&
+                  topPx + tileRenderPx >= 0f && topPx <= height
+                ) {
+                  drawImage(
+                    image = tileBitmap,
+                    dstOffset = IntOffset(leftPx.roundToInt(), topPx.roundToInt()),
+                    dstSize = IntSize(tileRenderInt, tileRenderInt)
+                  )
+                }
+              }
+            }
+          }
         }
-        drawPath(
-          path = riverPath,
-          color = MapWaterColor,
-          style = Stroke(width = 24f * zoomLevel)
-        )
 
-        // Draw Soft Park / Green Reserve
-        drawRoundRect(
-          color = MapParkColor,
-          topLeft = Offset(centerX - 120f * zoomLevel, centerY - 100f * zoomLevel),
-          size = Size(90f * zoomLevel, 60f * zoomLevel),
-          cornerRadius = CornerRadius(20f, 20f)
-        )
-
-        drawRoundRect(
-          color = MapParkColor,
-          topLeft = Offset(centerX + 60f * zoomLevel, centerY + 35f * zoomLevel),
-          size = Size(80f * zoomLevel, 55f * zoomLevel),
-          cornerRadius = CornerRadius(16f, 16f)
-        )
-
-        // Reference bounds for converting lat/lon coordinates to canvas space
-        val baseLat = userLocation.latitude
-        val baseLon = userLocation.longitude
-        val scale = 3200f * zoomLevel
-
-        // Draw Facility Markers
+        // --- LAYER C: Nearby Recycling Facility Pins & Callout Labels ---
         centers.forEach { center ->
-          val dx = (center.longitude - baseLon) * scale
-          val dy = -(center.latitude - baseLat) * scale
-          val pinX = centerX + dx.toFloat()
-          val pinY = centerY + dy.toFloat()
+          val pos = OpenStreetMapService.projectToCanvas(
+            lat = center.latitude,
+            lon = center.longitude,
+            centerLat = targetLat,
+            centerLon = targetLon,
+            zoom = osmZoom,
+            canvasCenterX = centerX,
+            canvasCenterY = centerY,
+            tileSizePx = tileRenderPx
+          )
+          val pinX = pos.x
+          val pinY = pos.y
 
           val isSelected = center.id == selectedCenterId
-          val pinRadius = if (isSelected) 18f else 13f
+          val pinRadius = if (isSelected) 22f else 15f
 
-          // Outer halo if selected
           if (isSelected) {
             drawCircle(
-              color = center.primarySpecialty.primaryColor.copy(alpha = 0.25f),
-              radius = pinRadius + 10f,
+              color = center.primarySpecialty.primaryColor.copy(alpha = 0.28f),
+              radius = pinRadius + 13f,
               center = Offset(pinX, pinY)
             )
             drawCircle(
-              color = center.primarySpecialty.primaryColor.copy(alpha = 0.45f),
-              radius = pinRadius + 5f,
+              color = center.primarySpecialty.primaryColor.copy(alpha = 0.48f),
+              radius = pinRadius + 6f,
               center = Offset(pinX, pinY)
             )
           }
 
-          // Pin circle background
+          // White outer ring
           drawCircle(
             color = Color.White,
-            radius = pinRadius + 2f,
+            radius = pinRadius + 3.5f,
             center = Offset(pinX, pinY)
           )
+          // Bin specialty color fill
           drawCircle(
             color = center.primarySpecialty.primaryColor,
             radius = pinRadius,
             center = Offset(pinX, pinY)
           )
-
-          // Inner white center dot
+          // Inner white dot
           drawCircle(
             color = Color.White,
-            radius = if (isSelected) 6f else 4.5f,
+            radius = if (isSelected) 7f else 5f,
             center = Offset(pinX, pinY)
           )
+
+          // Draw crisp floating facility name pill next to selected or nearby pins
+          val shortName = center.name.take(20) + if (center.name.length > 20) "…" else ""
+          val textWidth = pinLabelPaint.measureText(shortName)
+          val pillW = textWidth + 24f
+          val pillH = 38f
+          val pillLeft = (pinX - pillW / 2f).coerceIn(12f, (width - pillW - 12f).coerceAtLeast(12f))
+          val pillTop = pinY - pinRadius - pillH - 8f
+
+          if (pillTop > 46f && pillTop < height - 56f) {
+            val rect = android.graphics.RectF(pillLeft, pillTop, pillLeft + pillW, pillTop + pillH)
+            drawContext.canvas.nativeCanvas.drawRoundRect(rect, 14f, 14f, pillBgPaint)
+            drawContext.canvas.nativeCanvas.drawRoundRect(rect, 14f, 14f, pillBorderPaint)
+            drawContext.canvas.nativeCanvas.drawText(
+              shortName,
+              pillLeft + 12f,
+              pillTop + 27f,
+              if (isSelected) pinSubLabelPaint else pinLabelPaint
+            )
+          }
         }
 
-        // Draw User "You Are Here" Marker (serene pulsing blue/green beacon)
+        // --- LAYER D: User "You Are Here" GPS Marker & Label ---
+        val userPos = OpenStreetMapService.projectToCanvas(
+          lat = userLocation.latitude,
+          lon = userLocation.longitude,
+          centerLat = targetLat,
+          centerLon = targetLon,
+          zoom = osmZoom,
+          canvasCenterX = centerX,
+          canvasCenterY = centerY,
+          tileSizePx = tileRenderPx
+        )
         drawCircle(
           color = SereneOceanBlue.copy(alpha = pulseAlpha),
           radius = pulseRadius * zoomLevel,
-          center = Offset(centerX, centerY)
+          center = userPos
         )
         drawCircle(
           color = Color.White,
-          radius = 9f,
-          center = Offset(centerX, centerY)
+          radius = 13f,
+          center = userPos
         )
         drawCircle(
           color = SereneOceanBlue,
-          radius = 6.5f,
-          center = Offset(centerX, centerY)
+          radius = 9.5f,
+          center = userPos
         )
+
+        // Draw "You: <Area>" badge below user GPS pin
+        val youLabel = "You • ${userLocation.addressLabel.replace(" (GPS)", "").take(18)}"
+        val youWidth = pinSubLabelPaint.measureText(youLabel) + 24f
+        val youLeft = (userPos.x - youWidth / 2f).coerceIn(12f, (width - youWidth - 12f).coerceAtLeast(12f))
+        val youTop = userPos.y + 16f
+        if (youTop < height - 48f) {
+          val youRect = android.graphics.RectF(youLeft, youTop, youLeft + youWidth, youTop + 36f)
+          drawContext.canvas.nativeCanvas.drawRoundRect(youRect, 14f, 14f, pillBgPaint)
+          drawContext.canvas.nativeCanvas.drawRoundRect(youRect, 14f, 14f, pillBorderPaint)
+          drawContext.canvas.nativeCanvas.drawText(
+            youLabel,
+            youLeft + 12f,
+            youTop + 26f,
+            pinSubLabelPaint
+          )
+        }
       }
 
-      // 2. Interactive Facility Marker Click Overlays
+      // 2. Interactive Facility Marker Click Overlays (Preserved for tests & pin selection)
       centers.forEach { center ->
-        val baseLat = userLocation.latitude
-        val baseLon = userLocation.longitude
-        val scale = 3200f * zoomLevel
-        val dx = (center.longitude - baseLon) * scale
-        val dy = -(center.latitude - baseLat) * scale
-
-        // Overlay button clickable area
         Box(
           modifier = Modifier
             .fillMaxSize()
@@ -837,15 +1129,156 @@ fun RecyclingMapCard(
           val isSelected = center.id == selectedCenterId
           Box(
             modifier = Modifier
-              .size(if (isSelected) 44.dp else 36.dp)
+              .size(if (useOsmMapPreview) 1.dp else if (isSelected) 44.dp else 36.dp)
               .clip(CircleShape)
-              .clickable { onCenterSelected(center.id) }
+              .clickable {
+                onCenterSelected(center.id)
+                focusSelectedFacilityOnMap = true
+              }
               .testTag("map_pin_${center.id}")
           )
         }
       }
 
-      // 3. Floating Map Controls (Zoom & Recenter)
+      // 3. Top Controls Bar: Toggle between OpenStreetMap Live Preview & Eco Radar + Target Toggle
+      Row(
+        modifier = Modifier
+          .align(Alignment.TopStart)
+          .fillMaxWidth()
+          .padding(12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        // Left badge: OpenStreetMap Current Location / Selected Facility Focus
+        Surface(
+          shape = RoundedCornerShape(14.dp),
+          color = SleekSurface.copy(alpha = 0.94f),
+          border = BorderStroke(1.dp, SleekCardBorder),
+          shadowElevation = 2.dp,
+          modifier = Modifier
+            .clickable {
+              if (useOsmMapPreview) {
+                focusSelectedFacilityOnMap = !focusSelectedFacilityOnMap
+              }
+            }
+            .testTag("btn_osm_target_toggle")
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Box(
+              modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(if (useOsmMapPreview) SleekGreenPrimary else SereneOceanBlue)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+              text = if (useOsmMapPreview) {
+                if (focusSelectedFacilityOnMap && selectedCenterObj != null) {
+                  "OSM: ${selectedCenterObj.name.take(18)}…"
+                } else if (loadedTileCount > 0) {
+                  "OSM Live (${userLocation.addressLabel.replace(" (GPS)", "").take(14)})"
+                } else {
+                  "OSM Map (${userLocation.addressLabel.replace(" (GPS)", "").take(14)})"
+                }
+              } else {
+                "Your Location • Drag to explore"
+              },
+              style = MaterialTheme.typography.labelSmall.copy(
+                fontWeight = FontWeight.SemiBold,
+                color = SleekTextPrimary
+              )
+            )
+          }
+        }
+
+        // Right toggle chip: Switch between OpenStreetMap Live & Eco Radar
+        Surface(
+          shape = RoundedCornerShape(14.dp),
+          color = if (useOsmMapPreview) SleekGreenPrimary else SleekSurface.copy(alpha = 0.94f),
+          border = BorderStroke(1.dp, if (useOsmMapPreview) SleekGreenPrimary else SleekCardBorder),
+          shadowElevation = 2.dp,
+          modifier = Modifier
+            .clickable { useOsmMapPreview = !useOsmMapPreview }
+            .testTag("btn_toggle_map_mode")
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Icon(
+              imageVector = Icons.Default.Map,
+              contentDescription = "Switch Map View",
+              tint = if (useOsmMapPreview) Color.White else SereneOceanBlue,
+              modifier = Modifier.size(14.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+              text = if (useOsmMapPreview) "Radar View" else "OSM Live",
+              style = MaterialTheme.typography.labelSmall.copy(
+                fontWeight = FontWeight.Bold,
+                color = if (useOsmMapPreview) Color.White else SleekTextPrimary
+              )
+            )
+          }
+        }
+      }
+
+      // 4. Bottom-Left Action: Open Current Location or Facility in OpenStreetMap / Maps App
+      Surface(
+        modifier = Modifier
+          .align(Alignment.BottomStart)
+          .padding(14.dp)
+          .clickable {
+            val lat = if (focusSelectedFacilityOnMap && selectedCenterObj != null) {
+              selectedCenterObj.latitude
+            } else {
+              userLocation.latitude
+            }
+            val lon = if (focusSelectedFacilityOnMap && selectedCenterObj != null) {
+              selectedCenterObj.longitude
+            } else {
+              userLocation.longitude
+            }
+            val osmWebUri = Uri.parse(
+              "https://www.openstreetmap.org/?mlat=$lat&mlon=$lon#map=$osmZoom/$lat/$lon"
+            )
+            try {
+              context.startActivity(Intent(Intent.ACTION_VIEW, osmWebUri))
+            } catch (_: Exception) {
+              Toast.makeText(context, "OpenStreetMap ($lat, $lon)", Toast.LENGTH_SHORT).show()
+            }
+          }
+          .testTag("btn_open_in_osm"),
+        shape = RoundedCornerShape(14.dp),
+        color = SleekSurface.copy(alpha = 0.95f),
+        border = BorderStroke(1.dp, SleekCardBorder),
+        shadowElevation = 2.dp
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          Icon(
+            imageVector = Icons.Default.Directions,
+            contentDescription = "Open in OpenStreetMap",
+            tint = SereneOceanBlue,
+            modifier = Modifier.size(15.dp)
+          )
+          Spacer(modifier = Modifier.width(6.dp))
+          Text(
+            text = "Open in OpenStreetMap",
+            style = MaterialTheme.typography.labelSmall.copy(
+              fontWeight = FontWeight.Bold,
+              color = SereneOceanBlue
+            )
+          )
+        }
+      }
+
+      // 5. Floating Map Controls (Zoom & Recenter)
       Column(
         modifier = Modifier
           .align(Alignment.BottomEnd)
@@ -863,13 +1296,14 @@ fun RecyclingMapCard(
             .clickable {
               panOffsetX = 0f
               panOffsetY = 0f
+              focusSelectedFacilityOnMap = false
             }
             .testTag("btn_recenter_map")
         ) {
           Box(contentAlignment = Alignment.Center) {
             Icon(
               imageVector = Icons.Default.Navigation,
-              contentDescription = "Recenter",
+              contentDescription = "Recenter on Current Location",
               tint = SereneOceanBlue,
               modifier = Modifier.size(18.dp)
             )
@@ -880,9 +1314,13 @@ fun RecyclingMapCard(
           shape = RoundedCornerShape(16.dp),
           color = SleekSurface.copy(alpha = 0.95f),
           border = BorderStroke(1.dp, SleekCardBorder),
-          shadowElevation = 2.dp
+          shadowElevation = 2.dp,
+          modifier = Modifier.width(38.dp)
         ) {
-          Column {
+          Column(
+            modifier = Modifier.width(38.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+          ) {
             IconButton(
               onClick = { onZoomChange(0.25f) },
               modifier = Modifier.size(38.dp).testTag("btn_zoom_in")
@@ -897,43 +1335,6 @@ fun RecyclingMapCard(
               Icon(Icons.Default.Remove, contentDescription = "Zoom Out", tint = SleekTextPrimary, modifier = Modifier.size(18.dp))
             }
           }
-        }
-      }
-
-      // 4. Map Legend Badge (Top Left)
-      Surface(
-        modifier = Modifier
-          .align(Alignment.TopStart)
-          .padding(14.dp),
-        shape = RoundedCornerShape(14.dp),
-        color = SleekSurface.copy(alpha = 0.92f),
-        border = BorderStroke(1.dp, SleekCardBorder)
-      ) {
-        Row(
-          modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-          verticalAlignment = Alignment.CenterVertically
-        ) {
-          Box(
-            modifier = Modifier
-              .size(8.dp)
-              .clip(CircleShape)
-              .background(SereneOceanBlue)
-          )
-          Spacer(modifier = Modifier.width(6.dp))
-          Text(
-            text = "Your Location",
-            style = MaterialTheme.typography.labelSmall.copy(
-              fontWeight = FontWeight.Medium,
-              color = SleekTextSecondary
-            )
-          )
-          Spacer(modifier = Modifier.width(10.dp))
-          Text(
-            text = "• Drag to explore",
-            style = MaterialTheme.typography.labelSmall.copy(
-              color = SleekTextSecondary
-            )
-          )
         }
       }
     }
@@ -1260,14 +1661,17 @@ fun SelectedFacilityCard(
         Button(
           onClick = onGetDirections,
           shape = RoundedCornerShape(16.dp),
-          colors = ButtonDefaults.buttonColors(containerColor = SleekGreenPrimary),
+          colors = ButtonDefaults.buttonColors(
+            containerColor = SleekGreenPrimary,
+            contentColor = Color.White
+          ),
           modifier = Modifier
             .weight(1f)
             .testTag("btn_get_directions")
         ) {
-          Icon(Icons.Default.Directions, contentDescription = null, modifier = Modifier.size(16.dp))
+          Icon(Icons.Default.Directions, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
           Spacer(modifier = Modifier.width(6.dp))
-          Text("Get Directions", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+          Text("Get Directions", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
         }
 
         OutlinedButton(
@@ -1477,9 +1881,16 @@ fun AddressSelectionDialog(
         OutlinedTextField(
           value = manualInput,
           onValueChange = { manualInput = it },
-          placeholder = { Text("Enter street address, city, or zip code...", fontSize = 12.sp) },
+          placeholder = { Text("Enter street address, city, or zip code...", fontSize = 12.sp, color = SleekTextSecondary) },
           shape = RoundedCornerShape(16.dp),
           colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = SleekTextPrimary,
+            unfocusedTextColor = SleekTextPrimary,
+            cursorColor = SleekGreenPrimary,
+            focusedPlaceholderColor = SleekTextSecondary,
+            unfocusedPlaceholderColor = SleekTextSecondary,
+            focusedContainerColor = SleekSurface,
+            unfocusedContainerColor = SleekSurface,
             focusedBorderColor = SleekGreenPrimary,
             unfocusedBorderColor = SleekCardBorder
           ),
@@ -1493,12 +1904,15 @@ fun AddressSelectionDialog(
           Button(
             onClick = { onCustomAddressEntered(manualInput) },
             shape = RoundedCornerShape(14.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = SleekGreenPrimary),
+            colors = ButtonDefaults.buttonColors(
+              containerColor = SleekGreenPrimary,
+              contentColor = Color.White
+            ),
             modifier = Modifier
               .fillMaxWidth()
               .testTag("btn_confirm_address")
           ) {
-            Text("Set Address: $manualInput", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("Set Address: $manualInput", color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
           }
         }
 

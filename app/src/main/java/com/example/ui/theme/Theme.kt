@@ -51,18 +51,13 @@ private val LightColorScheme = lightColorScheme(
 
 @Composable
 fun MyApplicationTheme(
-  darkTheme: Boolean = isSystemInDarkTheme(),
+  darkTheme: Boolean = false,
   dynamicColor: Boolean = false, // Use our calming custom palette by default
   content: @Composable () -> Unit,
 ) {
-  val colorScheme = when {
-    dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-      val context = LocalContext.current
-      if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-    }
-    darkTheme -> DarkColorScheme
-    else -> LightColorScheme
-  }
+  // Always use LightColorScheme so SleekSurface cards, OutlinedTextFields, and SleekGreenPrimary
+  // buttons maintain high-contrast dark text on light backgrounds and crisp white text on green buttons.
+  val colorScheme = LightColorScheme
 
   MaterialTheme(
     colorScheme = colorScheme,
@@ -70,3 +65,4 @@ fun MyApplicationTheme(
     content = content
   )
 }
+
